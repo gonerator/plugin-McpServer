@@ -100,7 +100,10 @@ class ReportProcessed extends McpTool
                     'type' => 'object',
                     'additionalProperties' => true,
                     'description' => 'Optional report parameters '
-                        . '(safe generic params and report-specific selector params).',
+                        . '(safe generic params and report-specific selector params). '
+                        . 'Goals.getItemsSku, Goals.getItemsName and Goals.getItemsCategory also accept '
+                        . 'abandonedCarts (0 or 1) to return products left in abandoned carts instead of '
+                        . 'ordered products.',
                 ],
                 'goalMetricsMode' => [
                     'type' => 'string',

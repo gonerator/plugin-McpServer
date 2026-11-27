@@ -855,6 +855,207 @@ class ReportProcessedTest extends IntegrationTestCase
         self::assertSame('ecommerceOrder', $resolvedApiParameters['filter_show_goal_columns_process_goals'] ?? null);
     }
 
+    /**
+     * @dataProvider provideEcommerceItemReports
+     */
+    public function testReturnsAbandonedCartProductsForEcommerceItemReports(
+        string $apiAction,
+        string $orderedLabel,
+        string $abandonedLabel,
+    ): void {
+        $idSite = $this->createEcommerceSiteWithOrderAndAbandonedCart();
+        $reportUniqueId = $this->findReportUniqueId($idSite, 'Goals', $apiAction);
+        self::assertNotNull($reportUniqueId);
+
+        $selectors = [
+            'reportUniqueId' => ['reportUniqueId' => $reportUniqueId],
+            'apiModule/apiAction' => ['apiModule' => 'Goals', 'apiAction' => $apiAction],
+        ];
+
+        foreach ($selectors as $selectorName => $selector) {
+            $ordered = $this->callEcommerceItemReport($idSite, $selector);
+            self::assertSame([$orderedLabel], $this->readReportLabels($ordered), $selectorName);
+            $orderedResolved = $ordered['resolvedReport'] ?? null;
+            self::assertIsArray($orderedResolved);
+            self::assertIsArray($orderedResolved['apiParameters'] ?? null);
+            self::assertArrayNotHasKey('abandonedCarts', $orderedResolved['apiParameters'], $selectorName);
+
+            $explicitlyOrdered = $this->callEcommerceItemReport(
+                $idSite,
+                $selector + ['apiParameters' => ['abandonedCarts' => 0]],
+            );
+            self::assertSame([$orderedLabel], $this->readReportLabels($explicitlyOrdered), $selectorName);
+
+            $abandoned = $this->callEcommerceItemReport(
+                $idSite,
+                $selector + ['apiParameters' => ['abandonedCarts' => 1]],
+            );
+            self::assertSame([$abandonedLabel], $this->readReportLabels($abandoned), $selectorName);
+            $abandonedResolved = $abandoned['resolvedReport'] ?? null;
+            self::assertIsArray($abandonedResolved);
+            self::assertSame($reportUniqueId, $abandonedResolved['uniqueId'] ?? null, $selectorName);
+            self::assertSame('Goals', $abandonedResolved['apiModule'] ?? null, $selectorName);
+            self::assertSame($apiAction, $abandonedResolved['apiAction'] ?? null, $selectorName);
+            self::assertIsArray($abandonedResolved['apiParameters'] ?? null);
+            self::assertSame('1', $abandonedResolved['apiParameters']['abandonedCarts'] ?? null, $selectorName);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string, string, string}>
+     */
+    public static function provideEcommerceItemReports(): iterable
+    {
+        yield 'getItemsSku' => ['getItemsSku', 'SKU-ORDERED', 'SKU-ABANDONED'];
+        yield 'getItemsName' => ['getItemsName', 'Ordered product', 'Abandoned product'];
+        yield 'getItemsCategory' => ['getItemsCategory', 'Ordered category', 'Abandoned category'];
+    }
+
+    public function testRejectsAbandonedCartsForOtherReports(): void
+    {
+        $reportUniqueId = $this->findReportUniqueId($this->idSite, 'Actions', 'getPageUrls');
+        self::assertNotNull($reportUniqueId);
+
+        $server = McpTestHelper::buildServer();
+        $sessionId = McpTestHelper::initializeSession($server);
+        $baseArguments = [
+            'idSite' => $this->idSite,
+            'period' => 'day',
+            'date' => '2015-01-03',
+            'apiParameters' => ['abandonedCarts' => 1],
+        ];
+
+        McpTestHelper::callToolAndAssertError(
+            $server,
+            $sessionId,
+            ReportProcessed::TOOL_NAME,
+            $baseArguments + ['reportUniqueId' => $reportUniqueId],
+            'Invalid apiParameters for reportUniqueId lookup. '
+            . 'Only safe filter/sort/columns/expanded/flat/label/compare* parameters are allowed.',
+            __METHOD__,
+        );
+
+        McpTestHelper::callToolAndAssertError(
+            $server,
+            $sessionId,
+            ReportProcessed::TOOL_NAME,
+            $baseArguments + ['apiModule' => 'Actions', 'apiAction' => 'getPageUrls'],
+            'Report not found.',
+            __METHOD__,
+        );
+    }
+
+    /**
+     * @dataProvider provideInvalidAbandonedCartsValues
+     */
+    public function testRejectsAbandonedCartsValuesOtherThanZeroOrOne(mixed $value): void
+    {
+        $idSite = Fixture::createWebsite('2015-01-01 00:00:00', 1, 'MCP Ecommerce Value Test Site');
+        $reportUniqueId = $this->findReportUniqueId($idSite, 'Goals', 'getItemsName');
+        self::assertNotNull($reportUniqueId);
+
+        $server = McpTestHelper::buildServer();
+        $sessionId = McpTestHelper::initializeSession($server);
+        $baseArguments = [
+            'idSite' => $idSite,
+            'period' => 'day',
+            'date' => '2015-01-03',
+            'apiParameters' => ['abandonedCarts' => $value],
+        ];
+        $selectors = [
+            ['reportUniqueId' => $reportUniqueId],
+            ['apiModule' => 'Goals', 'apiAction' => 'getItemsName'],
+        ];
+
+        foreach ($selectors as $selector) {
+            McpTestHelper::callToolAndAssertError(
+                $server,
+                $sessionId,
+                ReportProcessed::TOOL_NAME,
+                $baseArguments + $selector,
+                "Invalid apiParameters value for key 'abandonedCarts': expected 0 or 1.",
+                __METHOD__,
+            );
+        }
+    }
+
+    /**
+     * @return iterable<string, array{mixed}>
+     */
+    public static function provideInvalidAbandonedCartsValues(): iterable
+    {
+        yield 'two' => [2];
+        yield 'negative one' => [-1];
+        yield 'word' => ['yes'];
+        yield 'true' => [true];
+        yield 'null' => [null];
+        yield 'list' => [[1]];
+    }
+
+    /**
+     * @param array<string, mixed> $arguments
+     *
+     * @return array<string, mixed>
+     */
+    private function callEcommerceItemReport(int $idSite, array $arguments): array
+    {
+        $server = McpTestHelper::buildServer();
+        $sessionId = McpTestHelper::initializeSession($server);
+
+        return McpTestHelper::callToolAndAssertSuccess(
+            $server,
+            $sessionId,
+            ReportProcessed::TOOL_NAME,
+            array_merge(
+                [
+                    'idSite' => $idSite,
+                    'period' => 'day',
+                    'date' => '2015-01-03',
+                ],
+                $arguments,
+            ),
+            __METHOD__,
+        );
+    }
+
+    /**
+     * One visit orders a product and a second visit leaves a different product in its cart, so
+     * the ordered and the abandoned product reports each hold exactly one distinct row.
+     */
+    private function createEcommerceSiteWithOrderAndAbandonedCart(): int
+    {
+        $idSite = Fixture::createWebsite(
+            '2015-01-01 00:00:00',
+            1,
+            'MCP Ecommerce Report Test Site',
+            'https://report-ecommerce.test',
+        );
+
+        $tracker = Fixture::getTracker(
+            $idSite,
+            '2015-01-03 12:00:00',
+            defaultInit: true,
+            useLocal: true,
+        );
+        $tracker->setUrl('https://report-ecommerce.test/checkout');
+        $tracker->addEcommerceItem('SKU-ORDERED', 'Ordered product', 'Ordered category', 10.0, 1);
+        Fixture::checkResponse($tracker->doTrackEcommerceOrder('MCP-ORDER-1', 10.0));
+
+        $tracker = Fixture::getTracker(
+            $idSite,
+            '2015-01-03 14:00:00',
+            defaultInit: true,
+            useLocal: true,
+        );
+        $tracker->setIp('156.5.3.9');
+        $tracker->setNewVisitorId();
+        $tracker->setUrl('https://report-ecommerce.test/cart');
+        $tracker->addEcommerceItem('SKU-ABANDONED', 'Abandoned product', 'Abandoned category', 20.0, 2);
+        Fixture::checkResponse($tracker->doTrackEcommerceCartUpdate(40.0));
+
+        return $idSite;
+    }
+
     public function testSpecificGoalDefaultsProcessGoalsForActionsReport(): void
     {
         $reportUniqueId = $this->findReportUniqueId($this->idSite, 'Actions', 'getPageUrls');

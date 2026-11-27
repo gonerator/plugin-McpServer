@@ -96,6 +96,23 @@ final class ReportProcessedQueryService implements ReportProcessedQueryServiceIn
         'translateColumnNames' => true,
     ];
 
+    private const ABANDONED_CARTS_KEY = 'abandonedCarts';
+
+    /**
+     * Reports whose API method takes `abandonedCarts`. The switch is not part of any report's
+     * metadata parameters, so it cannot take part in the module/action lookup, and it stays
+     * rejected for every report outside this list.
+     *
+     * @var array<string, array<string, true>>
+     */
+    private const ABANDONED_CARTS_REPORT_ACTIONS = [
+        'Goals' => [
+            'getItemsSku' => true,
+            'getItemsName' => true,
+            'getItemsCategory' => true,
+        ],
+    ];
+
     /** @var callable|null */
     private $processedReportCaller;
 
@@ -138,6 +155,11 @@ final class ReportProcessedQueryService implements ReportProcessedQueryServiceIn
 
         if ($reportUniqueId !== null) {
             $reportMetadata = $this->metadataQueryService->getReportMetadataByUniqueId($idSite, $reportUniqueId);
+            [$reportScopedRequestParameters, $reportSpecificParameters] = $this->extractReportScopedRequestParameters(
+                $reportMetadata->module,
+                $reportMetadata->action,
+                $reportSpecificParameters,
+            );
             if ($reportSpecificParameters !== []) {
                 throw new McpToolCallException(
                     'Invalid apiParameters for reportUniqueId lookup. '
@@ -145,6 +167,11 @@ final class ReportProcessedQueryService implements ReportProcessedQueryServiceIn
                 );
             }
         } else {
+            [$reportScopedRequestParameters, $reportSpecificParameters] = $this->extractReportScopedRequestParameters(
+                (string) $apiModule,
+                (string) $apiAction,
+                $reportSpecificParameters,
+            );
             $reportMetadata = $this->resolveMetadataByModuleAction(
                 $idSite,
                 (string) $apiModule,
@@ -168,7 +195,11 @@ final class ReportProcessedQueryService implements ReportProcessedQueryServiceIn
             $idGoal,
             $reportUsesIdGoalSelector,
         );
-        $requestParameters = array_merge($genericRequestParameters, $goalRequestParameters);
+        $requestParameters = array_merge(
+            $genericRequestParameters,
+            $reportScopedRequestParameters,
+            $goalRequestParameters,
+        );
         $resolvedApiParametersForResponse = array_merge($apiParametersForCall, $requestParameters);
         $idGoalForCoreCall = $reportUsesIdGoalSelector ? $idGoal : null;
 
@@ -462,6 +493,40 @@ final class ReportProcessedQueryService implements ReportProcessedQueryServiceIn
         }
 
         return [$genericSafe, $reportSpecific];
+    }
+
+    /**
+     * Moves the parameters a specific report's API method accepts out of the report-specific
+     * bucket, so they are sent with the request instead of being matched against report metadata.
+     *
+     * Core's processed-report lookup only matches a report without metadata parameters when no
+     * report parameters are supplied, so these travel as request parameters, which the nested
+     * report request inherits. For any other report the key is left in place and fails as before.
+     *
+     * @param array<string, mixed> $reportSpecificParameters
+     * @return array{0: array<string, string>, 1: array<string, mixed>}
+     */
+    private function extractReportScopedRequestParameters(
+        string $apiModule,
+        string $apiAction,
+        array $reportSpecificParameters,
+    ): array {
+        if (
+            !array_key_exists(self::ABANDONED_CARTS_KEY, $reportSpecificParameters)
+            || !isset(self::ABANDONED_CARTS_REPORT_ACTIONS[$apiModule][$apiAction])
+        ) {
+            return [[], $reportSpecificParameters];
+        }
+
+        $value = $reportSpecificParameters[self::ABANDONED_CARTS_KEY];
+        if ($value !== 0 && $value !== 1 && $value !== '0' && $value !== '1') {
+            throw new McpToolCallException(
+                "Invalid apiParameters value for key '" . self::ABANDONED_CARTS_KEY . "': expected 0 or 1.",
+            );
+        }
+        unset($reportSpecificParameters[self::ABANDONED_CARTS_KEY]);
+
+        return [[self::ABANDONED_CARTS_KEY => (string) $value], $reportSpecificParameters];
     }
 
     private function isGenericSafeApiParameterKey(string $key): bool
