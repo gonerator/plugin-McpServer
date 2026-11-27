@@ -97,6 +97,8 @@ Some tools accept equivalent ways of writing the same argument and rewrite them 
 
 Argument problems are reported on two channels. Failures against the tool's published input schema keep the JSON-RPC `-32602` (invalid params) error; this includes combining `reportUniqueId` with `apiModule` or `apiAction`, and a parameter object supplied as a string that is not visibly an object (a bare word or a quoted scalar keeps its schema type error). Problems found while normalizing arguments return a normal tool result with `isError: true`: contradictory raw-API selectors, conflicting aliases or parameter locations, a method name outside the `Module.action` form, a selector value longer than 256 bytes, and a parameter object string that opens as an object but does not decode as a bounded JSON object. These name the JSON pointers involved without repeating the values at them, so a segment expression or a token pasted into a parameter object is not echoed back.
 
+`matomo_report_processed` accepts `abandonedCarts` (`0` or `1`) in `apiParameters` for the ecommerce product reports `Goals.getItemsSku`, `Goals.getItemsName` and `Goals.getItemsCategory` only. With `1` these reports return the products left in abandoned carts instead of the ordered products. For any other report the parameter is rejected like every other unsupported report parameter, and a value other than `0` or `1` is reported as a tool result error.
+
 A `segment` Matomo cannot parse, or one naming a field this Matomo does not provide, is not an argument problem in the sense above — it is reported as a tool result error naming the segment as the problem, without repeating the expression.
 
 ## Troubleshooting

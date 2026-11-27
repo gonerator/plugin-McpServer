@@ -22,6 +22,7 @@ use Piwik\Plugins\McpServer\Contracts\Ports\Reports\ReportMetadataQueryServiceIn
 use Piwik\Plugins\McpServer\Contracts\Ports\Reports\StrictSegmentPolicyServiceInterface;
 use Piwik\Plugins\McpServer\Contracts\Ports\Reports\TranslatorContextRunnerInterface;
 use Piwik\Plugins\McpServer\Contracts\Records\Reports\ReportMetadataRecord;
+use Piwik\Plugins\McpServer\Contracts\Records\Reports\ReportProcessedRecord;
 use Piwik\Plugins\McpServer\Services\Reports\ReportProcessedQueryService;
 use Piwik\Plugins\McpServer\Support\Errors\CoreApiRequestException;
 use Piwik\Plugins\McpServer\Support\Errors\InfrastructureDataException;
@@ -1766,6 +1767,349 @@ class ReportProcessedQueryServiceTest extends TestCase
             filterLimit: 10,
             filterOffset: 0,
         );
+    }
+
+    /**
+     * @dataProvider provideAbandonedCartsReportSelections
+     */
+    public function testForwardsAbandonedCartsAsRequestParameterForEcommerceItemReports(
+        string $apiAction,
+        bool $selectByUniqueId,
+        int|string $abandonedCarts,
+        string $expectedValue,
+    ): void {
+        $lookups = new \ArrayObject();
+        $capturedApiParameters = null;
+        $capturedRequestParameters = null;
+
+        $service = $this->makeService(
+            $this->makeFixedReportMetadataWrapper('Goals', $apiAction, $lookups),
+            static function (
+                int $idSite,
+                string $period,
+                string $date,
+                string $apiModule,
+                string $apiAction,
+                ?string $segment,
+                array $apiParameters,
+                array $requestParameters,
+            ) use (
+                &$capturedApiParameters,
+                &$capturedRequestParameters
+            ): array {
+                $capturedApiParameters = $apiParameters;
+                $capturedRequestParameters = $requestParameters;
+
+                return self::makeProcessedReportPayload();
+            },
+        );
+
+        $record = $this->getProcessedReportWithApiParameters(
+            $service,
+            'Goals',
+            $apiAction,
+            $selectByUniqueId,
+            ['abandonedCarts' => $abandonedCarts, 'flat' => '1'],
+        );
+
+        self::assertIsArray($capturedRequestParameters);
+        self::assertSame($expectedValue, $capturedRequestParameters['abandonedCarts'] ?? null);
+        self::assertSame('1', $capturedRequestParameters['flat'] ?? null);
+        // Core only matches a report without metadata parameters when no report parameters are sent.
+        self::assertSame([], $capturedApiParameters);
+        self::assertSame($selectByUniqueId ? [] : [[]], $lookups->getArrayCopy());
+        self::assertSame('Goals', $record->apiModule);
+        self::assertSame($apiAction, $record->apiAction);
+        self::assertSame($expectedValue, $record->apiParameters['abandonedCarts'] ?? null);
+    }
+
+    /**
+     * @return iterable<string, array{string, bool, int|string, string}>
+     */
+    public static function provideAbandonedCartsReportSelections(): iterable
+    {
+        foreach (['getItemsSku', 'getItemsName', 'getItemsCategory'] as $apiAction) {
+            foreach ([true, false] as $selectByUniqueId) {
+                $selector = $selectByUniqueId ? 'reportUniqueId' : 'apiModule/apiAction';
+                yield "{$apiAction} by {$selector} with 1" => [$apiAction, $selectByUniqueId, 1, '1'];
+                yield "{$apiAction} by {$selector} with 0" => [$apiAction, $selectByUniqueId, 0, '0'];
+                yield "{$apiAction} by {$selector} with '1'" => [$apiAction, $selectByUniqueId, '1', '1'];
+                yield "{$apiAction} by {$selector} with '0'" => [$apiAction, $selectByUniqueId, '0', '0'];
+            }
+        }
+    }
+
+    /**
+     * @dataProvider provideEcommerceItemReportSelectorModes
+     */
+    public function testDoesNotSendAbandonedCartsForEcommerceItemReportsUnlessRequested(bool $selectByUniqueId): void
+    {
+        $capturedRequestParameters = null;
+
+        $service = $this->makeService(
+            $this->makeFixedReportMetadataWrapper('Goals', 'getItemsName', new \ArrayObject()),
+            static function (
+                int $idSite,
+                string $period,
+                string $date,
+                string $apiModule,
+                string $apiAction,
+                ?string $segment,
+                array $apiParameters,
+                array $requestParameters,
+            ) use (&$capturedRequestParameters): array {
+                $capturedRequestParameters = $requestParameters;
+
+                return self::makeProcessedReportPayload();
+            },
+        );
+
+        $record = $this->getProcessedReportWithApiParameters(
+            $service,
+            'Goals',
+            'getItemsName',
+            $selectByUniqueId,
+            null,
+        );
+
+        self::assertIsArray($capturedRequestParameters);
+        self::assertArrayNotHasKey('abandonedCarts', $capturedRequestParameters);
+        self::assertArrayNotHasKey('abandonedCarts', $record->apiParameters);
+    }
+
+    /**
+     * @return iterable<string, array{bool}>
+     */
+    public static function provideEcommerceItemReportSelectorModes(): iterable
+    {
+        yield 'reportUniqueId' => [true];
+        yield 'apiModule/apiAction' => [false];
+    }
+
+    /**
+     * @dataProvider provideReportsWithoutAbandonedCartsSupport
+     */
+    public function testRejectsAbandonedCartsForOtherReportsByUniqueId(string $apiModule, string $apiAction): void
+    {
+        $processedFetchCalls = 0;
+        $service = $this->makeService(
+            $this->makeFixedReportMetadataWrapper($apiModule, $apiAction, new \ArrayObject()),
+            static function () use (&$processedFetchCalls): array {
+                $processedFetchCalls++;
+
+                return self::makeProcessedReportPayload();
+            },
+        );
+
+        try {
+            $this->getProcessedReportWithApiParameters(
+                $service,
+                $apiModule,
+                $apiAction,
+                true,
+                ['abandonedCarts' => 1],
+            );
+            self::fail('Expected abandonedCarts to be rejected.');
+        } catch (McpToolCallException $e) {
+            self::assertStringContainsString('Invalid apiParameters for reportUniqueId lookup.', $e->getMessage());
+        }
+
+        self::assertSame(0, $processedFetchCalls);
+    }
+
+    /**
+     * @dataProvider provideReportsWithoutAbandonedCartsSupport
+     */
+    public function testKeepsAbandonedCartsInMetadataLookupForOtherReportsByModuleAction(
+        string $apiModule,
+        string $apiAction,
+    ): void {
+        $lookups = new \ArrayObject();
+        $processedFetchCalls = 0;
+        $service = $this->makeService(
+            $this->makeFixedReportMetadataWrapper($apiModule, $apiAction, $lookups),
+            static function () use (&$processedFetchCalls): array {
+                $processedFetchCalls++;
+
+                return self::makeProcessedReportPayload();
+            },
+        );
+
+        try {
+            $this->getProcessedReportWithApiParameters(
+                $service,
+                $apiModule,
+                $apiAction,
+                false,
+                ['abandonedCarts' => 1],
+            );
+            self::fail('Expected abandonedCarts to be rejected.');
+        } catch (McpToolCallException $e) {
+            self::assertSame('Report not found.', $e->getMessage());
+        }
+
+        // The key stays a report-specific selector, so the lookup cannot match a report with it.
+        self::assertSame([['abandonedCarts' => 1]], $lookups->getArrayCopy());
+        self::assertSame(0, $processedFetchCalls);
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function provideReportsWithoutAbandonedCartsSupport(): iterable
+    {
+        yield 'other module' => ['Actions', 'getPageUrls'];
+        yield 'other Goals report' => ['Goals', 'get'];
+        yield 'same action name in another module' => ['Actions', 'getItemsName'];
+        yield 'different case' => ['Goals', 'getitemsname'];
+    }
+
+    /**
+     * @dataProvider provideInvalidAbandonedCartsValues
+     */
+    public function testRejectsAbandonedCartsValuesOtherThanZeroOrOne(mixed $value, bool $selectByUniqueId): void
+    {
+        $lookups = new \ArrayObject();
+        $processedFetchCalls = 0;
+        $service = $this->makeService(
+            $this->makeFixedReportMetadataWrapper('Goals', 'getItemsName', $lookups),
+            static function () use (&$processedFetchCalls): array {
+                $processedFetchCalls++;
+
+                return self::makeProcessedReportPayload();
+            },
+        );
+
+        try {
+            $this->getProcessedReportWithApiParameters(
+                $service,
+                'Goals',
+                'getItemsName',
+                $selectByUniqueId,
+                ['abandonedCarts' => $value],
+            );
+            self::fail('Expected the abandonedCarts value to be rejected.');
+        } catch (McpToolCallException $e) {
+            self::assertSame(
+                "Invalid apiParameters value for key 'abandonedCarts': expected 0 or 1.",
+                $e->getMessage(),
+            );
+        }
+
+        self::assertSame([], $lookups->getArrayCopy());
+        self::assertSame(0, $processedFetchCalls);
+    }
+
+    /**
+     * @return iterable<string, array{mixed, bool}>
+     */
+    public static function provideInvalidAbandonedCartsValues(): iterable
+    {
+        $values = [
+            'two' => 2,
+            'negative one' => -1,
+            'word' => 'yes',
+            'numeric string two' => '2',
+            'padded string' => ' 1',
+            'empty string' => '',
+            'float' => 1.0,
+            'true' => true,
+            'false' => false,
+            'null' => null,
+            'list' => [1],
+        ];
+
+        foreach ($values as $name => $value) {
+            yield "{$name} by reportUniqueId" => [$value, true];
+            yield "{$name} by apiModule/apiAction" => [$value, false];
+        }
+    }
+
+    /**
+     * @param array<string, mixed>|null $apiParameters
+     */
+    private function getProcessedReportWithApiParameters(
+        ReportProcessedQueryService $service,
+        string $apiModule,
+        string $apiAction,
+        bool $selectByUniqueId,
+        ?array $apiParameters,
+    ): ReportProcessedRecord {
+        return $service->getProcessedReport(
+            idSite: 1,
+            period: 'day',
+            date: 'today',
+            reportUniqueId: $selectByUniqueId ? $apiModule . '_' . $apiAction : null,
+            apiModule: $selectByUniqueId ? null : $apiModule,
+            apiAction: $selectByUniqueId ? null : $apiAction,
+            apiParameters: $apiParameters,
+            goalMetricsMode: null,
+            goalMetricsProcessGoals: null,
+            segment: null,
+            idGoal: null,
+            idDimension: null,
+            idSubtable: null,
+            filterLimit: 50,
+            filterOffset: 0,
+        );
+    }
+
+    /**
+     * Resolves one report that, like the ecommerce item reports, has no metadata parameters: a
+     * module/action lookup carrying any report parameter finds nothing, as in the real service.
+     *
+     * @param \ArrayObject<int, array<string, mixed>> $moduleActionLookups
+     */
+    private function makeFixedReportMetadataWrapper(
+        string $module,
+        string $action,
+        \ArrayObject $moduleActionLookups,
+    ): ReportMetadataQueryServiceInterface {
+        return new class ($module, $action, $moduleActionLookups) implements ReportMetadataQueryServiceInterface {
+            /**
+             * @param \ArrayObject<int, array<string, mixed>> $moduleActionLookups
+             */
+            public function __construct(
+                private string $module,
+                private string $action,
+                private \ArrayObject $moduleActionLookups,
+            ) {
+            }
+
+            public function getReportMetadataByUniqueId(int $idSite, string $reportUniqueId): ReportMetadataRecord
+            {
+                return $this->makeRecord();
+            }
+
+            public function getReportMetadataByModuleAction(
+                int $idSite,
+                string $apiModule,
+                string $apiAction,
+                array $apiParameters,
+                string $period,
+                string $date,
+            ): ReportMetadataRecord {
+                $this->moduleActionLookups->append($apiParameters);
+                if ($apiModule !== $this->module || $apiAction !== $this->action || $apiParameters !== []) {
+                    throw new McpToolCallException('Report not found.');
+                }
+
+                return $this->makeRecord();
+            }
+
+            private function makeRecord(): ReportMetadataRecord
+            {
+                return new ReportMetadataRecord(
+                    uniqueId: $this->module . '_' . $this->action,
+                    module: $this->module,
+                    action: $this->action,
+                    name: 'Report',
+                    category: 'Category',
+                    parameters: [],
+                    metadata: [],
+                );
+            }
+        };
     }
 
     private function makeService(
